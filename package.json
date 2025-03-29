@@ -1,0 +1,30 @@
+{
+  "name": "jit-veda-hook",
+  "version": "1.0.0",
+  "description": "**JIT-LiquiLend-Hook** is a project that leverages **Uniswap V4 Hooks** to provide **just-in-time liquidity** and **yield earning** via **Aave** when liquidity is not actively utilized during swaps. The project also integrates **EigenLayer AVS** to determine the current price and ideal tick range for JIT liquidity based on recent market volatility. This system optimizes liquidity utilization by automatically shifting idle liquidity to the Aave lending protocol for passive yield generation.",
+  "main": "index.js",
+  "directories": {
+    "lib": "lib",
+    "test": "test"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rakpawel/jit-liquilend-hook.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/rakpawel/jit-liquilend-hook/issues"
+  },
+  "homepage": "https://github.com/rakpawel/jit-liquilend-hook#readme",
+  "devDependencies": {
+    "prettier": "^3.5.3",
+    "prettier-plugin-solidity": "^1.4.2",
+    "solhint": "^5.0.5"
+  }
+}
