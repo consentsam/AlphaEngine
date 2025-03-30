@@ -260,15 +260,30 @@ contract Hook is BaseHook {
     {
         console.log("Hook.beforeSwap() => caller:", sender);
 
-        // 1) confirm pool is init
-        (uint160 sqrtPriceX96, int24 currentTick, , ) = poolManager.getSlot0(
-            key.toId()
+        // 1) confirm pool is init and set range
+        (uint160 sqrtPriceX96, int24 currentTick) = _confirmPoolAndSetRange(
+            key,
+            hookData
         );
+
+        // 2) withdraw from vault and add liquidity
+        _withdrawFromVaultAndAddLiquidity(key, sqrtPriceX96, hookData);
+
+        return (this.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
+    }
+
+    // Helper for confirming pool initialization and setting tick range
+    function _confirmPoolAndSetRange(
+        PoolKey calldata key,
+        bytes calldata hookData
+    ) internal returns (uint160 sqrtPriceX96, int24 currentTick) {
+        // Get pool info
+        (sqrtPriceX96, currentTick, , ) = poolManager.getSlot0(key.toId());
         console.log("   sqrtPriceX96 =>", sqrtPriceX96);
         console.log("   currentTick =>", currentTick);
         if (sqrtPriceX96 == 0) revert PoolNotInitialized();
 
-        // 2) set ephemeral range
+        // Set ephemeral range
         if (hookData.length > 0) {
             (tickLower, tickUpper) = abi.decode(hookData, (int24, int24));
         } else {
@@ -280,7 +295,16 @@ contract Hook is BaseHook {
         console.log("   chosen tickLower =>", tickLower);
         console.log("   chosen tickUpper =>", tickUpper);
 
-        // 3) aggregator withdraw all from aggregatorVault
+        return (sqrtPriceX96, currentTick);
+    }
+
+    // Helper for withdrawing from vault and adding liquidity
+    function _withdrawFromVaultAndAddLiquidity(
+        PoolKey calldata key,
+        uint160 sqrtPriceX96,
+        bytes calldata hookData
+    ) internal {
+        // Withdraw all from aggregatorVault
         address asset0 = Currency.unwrap(key.currency0);
         address asset1 = Currency.unwrap(key.currency1);
         uint256 totalSh0 = aggregatorVault.totalShares(IERC20(asset0));
@@ -297,12 +321,25 @@ contract Hook is BaseHook {
             aggregatorVault.withdraw(IERC20(asset1), address(this), totalSh1);
         }
 
-        // 4) final balances => add short-range liquidity
+        // Add liquidity with tokens
+        _addLiquidityWithTokens(key, sqrtPriceX96, asset0, asset1, hookData);
+    }
+
+    // Helper for adding liquidity with tokens
+    function _addLiquidityWithTokens(
+        PoolKey calldata key,
+        uint160 sqrtPriceX96,
+        address asset0,
+        address asset1,
+        bytes calldata hookData
+    ) internal {
+        // Get balances
         uint256 bal0 = IERC20(asset0).balanceOf(address(this));
         uint256 bal1 = IERC20(asset1).balanceOf(address(this));
         console.log("   final Hook contract bal0 =>", bal0);
         console.log("   final Hook contract bal1 =>", bal1);
 
+        // Calculate liquidity
         liquidityAdded = LiquidityAmounts.getLiquidityForAmounts(
             sqrtPriceX96,
             TickMath.getSqrtPriceAtTick(tickLower),
@@ -313,31 +350,38 @@ contract Hook is BaseHook {
         console.log("   liquidityAdded =>", liquidityAdded);
 
         if (liquidityAdded > 0) {
-            (BalanceDelta delta, ) = poolManager.modifyLiquidity(
-                key,
-                IPoolManager.ModifyLiquidityParams({
-                    tickLower: tickLower,
-                    tickUpper: tickUpper,
-                    liquidityDelta: int128(liquidityAdded),
-                    salt: bytes32(0)
-                }),
-                hookData
-            );
-            if (delta.amount0() < 0) {
-                uint256 owed0 = uint256(int256(-delta.amount0()));
-                console.log(" aggregator owes token0 =>", owed0);
-                key.currency0.settle(poolManager, address(this), owed0, false);
-            }
-            if (delta.amount1() < 0) {
-                uint256 owed1 = uint256(int256(-delta.amount1()));
-                console.log(" aggregator owes token1 =>", owed1);
-                key.currency1.settle(poolManager, address(this), owed1, false);
-            }
+            _modifyLiquidityAndSettle(key, hookData);
         } else {
             console.log("   0 liquidity => skipping modifyLiquidity call.");
         }
+    }
 
-        return (this.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
+    // Helper for modifying liquidity and settling
+    function _modifyLiquidityAndSettle(
+        PoolKey calldata key,
+        bytes calldata hookData
+    ) internal {
+        (BalanceDelta delta, ) = poolManager.modifyLiquidity(
+            key,
+            IPoolManager.ModifyLiquidityParams({
+                tickLower: tickLower,
+                tickUpper: tickUpper,
+                liquidityDelta: int128(liquidityAdded),
+                salt: bytes32(0)
+            }),
+            hookData
+        );
+
+        if (delta.amount0() < 0) {
+            uint256 owed0 = uint256(int256(-delta.amount0()));
+            console.log(" aggregator owes token0 =>", owed0);
+            key.currency0.settle(poolManager, address(this), owed0, false);
+        }
+        if (delta.amount1() < 0) {
+            uint256 owed1 = uint256(int256(-delta.amount1()));
+            console.log(" aggregator owes token1 =>", owed1);
+            key.currency1.settle(poolManager, address(this), owed1, false);
+        }
     }
 
     // ------------------------------------------------------------
@@ -359,6 +403,22 @@ contract Hook is BaseHook {
 
         console.log("   Removing JIT liquidity =>", liquidityAdded);
 
+        // Remove liquidity
+        _removeLiquidityAndTakeTokens(key, hookData);
+
+        // Re-deposit leftover tokens
+        _reDepositLeftoverTokens(key);
+
+        // reset
+        liquidityAdded = 0;
+        return (this.afterSwap.selector, 0);
+    }
+
+    // Helper to remove liquidity and take tokens
+    function _removeLiquidityAndTakeTokens(
+        PoolKey calldata key,
+        bytes calldata hookData
+    ) internal {
         (BalanceDelta delta, ) = poolManager.modifyLiquidity(
             key,
             IPoolManager.ModifyLiquidityParams({
@@ -380,8 +440,10 @@ contract Hook is BaseHook {
             console.log(" aggregator Taking token1 =>", amt1);
             key.currency1.take(poolManager, address(this), amt1, false);
         }
+    }
 
-        // re-deposit leftover tokens
+    // Helper to re-deposit leftover tokens
+    function _reDepositLeftoverTokens(PoolKey calldata key) internal {
         address asset0 = Currency.unwrap(key.currency0);
         address asset1 = Currency.unwrap(key.currency1);
         uint256 finalBal0 = IERC20(asset0).balanceOf(address(this));
@@ -397,10 +459,6 @@ contract Hook is BaseHook {
             IERC20(asset1).approve(address(aggregatorVault), finalBal1);
             aggregatorVault.deposit(IERC20(asset1), address(this), finalBal1);
         }
-
-        // reset
-        liquidityAdded = 0;
-        return (this.afterSwap.selector, 0);
     }
 
     // helper views
