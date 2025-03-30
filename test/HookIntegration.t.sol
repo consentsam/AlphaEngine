@@ -1,19 +1,28 @@
-// -----------------------------------------------------------------------------
-// File: test/HookIntegration.t.sol
-// -----------------------------------------------------------------------------
-
+// ./test/HookIntegration.t.sol
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.0;
 
+//////////////////////////////////////////////////////
+//                  Imports                         //
+//////////////////////////////////////////////////////
+
+// CODE_UPDATED_HERE: unify on OpenZeppelin's IERC20
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Test} from "../lib/forge-std/src/Test.sol";
+import {console} from "../lib/forge-std/src/console.sol";
+
 import {Deployers} from "../lib/v4-periphery/lib/v4-core/test/utils/Deployers.sol";
 import {PoolManager} from "../lib/v4-periphery/lib/v4-core/src/PoolManager.sol";
 import {IPoolManager} from "../lib/v4-periphery/lib/v4-core/src/interfaces/IPoolManager.sol";
 import {IHooks} from "../lib/v4-periphery/lib/v4-core/src/interfaces/IHooks.sol";
+
+// We keep MockERC20 from solmate for testing
 import {MockERC20} from "../lib/v4-periphery/lib/v4-core/lib/solmate/src/test/utils/mocks/MockERC20.sol";
+
 import {Hook} from "../src/Hook.sol";
-import {MockAavePool} from "./MockAavePool.sol";
-import {MockTeller} from "./MockTeller.sol";
+// CODE_UPDATED_HERE: aggregatorVault is the new vault that stores multi-token
+import {HookVault} from "../src/HookVault.sol";
+
 import {Currency, CurrencyLibrary} from "../lib/v4-periphery/lib/v4-core/src/types/Currency.sol";
 import {PoolKey} from "../lib/v4-periphery/lib/v4-core/src/types/PoolKey.sol";
 import {PoolSwapTest} from "../lib/v4-periphery/lib/v4-core/src/test/PoolSwapTest.sol";
@@ -21,46 +30,63 @@ import {TickMath} from "../lib/v4-periphery/lib/v4-core/src/libraries/TickMath.s
 
 /**
  * @title HookIntegrationTest
- * @dev Integration tests focusing on the Hook contract's interactions with MockAavePool and MockTeller.
+ * @dev Integration tests focusing on the updated Hook contract's interactions with aggregatorVault (HookVault).
+ *
+ * Re-using original test cases, adapted to aggregatorVault usage.
  */
 contract HookIntegrationTest is Test, Deployers {
+    ///////////////////////////////////////////////////////////////
+    //                 Contract Instances                        //
+    ///////////////////////////////////////////////////////////////
+
     PoolManager public pm;
-    MockAavePool public aavePoolMock;
-    MockTeller public vedaTellerMock;
+    HookVault public aggregatorVault; // CODE_UPDATED_HERE: aggregator vault
     Hook public testHook;
 
+    // Basic tokens used in testing
     Currency public tokenA;
     Currency public tokenB;
+
+    // The poolKey used for our Uniswap V4 pool
     PoolKey public poolKey;
 
-    /// @dev The initial sqrtPrice used when creating the pool (price of 1:1).
+    // A typical sqrtPrice for a 1:1 ratio
     uint160 internal constant MY_SQRT_PRICE_1_1 = 79228162514264337593543950336;
 
+    ///////////////////////////////////////////////////////////////
+    //                        setUp                              //
+    ///////////////////////////////////////////////////////////////
+
     /**
-     * @notice Sets up the PoolManager, mock aggregator protocols, and Hook contract.
+     * @notice Sets up the environment for testing, including HookVault, Hook, and a sample pool.
      */
     function setUp() public {
-        // Deploy manager & routers from the Deployers library
+        console.log("HookIntegrationTest.setUp() start...");
+
+        // 1) Deploy manager & routers from the Deployers library
         deployFreshManagerAndRouters();
         pm = PoolManager(address(manager));
 
-        // Deploy aggregator mocks
-        aavePoolMock = new MockAavePool();
-        vedaTellerMock = new MockTeller();
-
-        // Deploy & mint test tokens, returning them as Currency wrappers
+        // 2) Deploy & mint two tokens (tokenA, tokenB)
         (tokenA, tokenB) = deployMintAndApprove2Currencies();
 
-        // Deploy Hook contract at a flagged address
-        address flaggedHookAddr = address(uint160(0x8C0));
-        deployCodeTo(
-            "Hook",
-            abi.encode(pm, address(aavePoolMock), address(vedaTellerMock)),
-            flaggedHookAddr
-        );
-        testHook = Hook(flaggedHookAddr);
+        // 3) aggregatorVault: the new multi-asset vault
+        aggregatorVault = new HookVault();
 
-        // Create a pool with Hook set as the IHooks implementation
+        // 4) Deploy Hook with references to pm + aggregatorVault
+        {
+            address flaggedHookAddr = address(uint160(0x8C0));
+            // We'll encode the constructor arguments: (PoolManager, HookVault)
+            deployCodeTo(
+                "Hook",
+                abi.encode(pm, aggregatorVault),
+                flaggedHookAddr
+            );
+            testHook = Hook(flaggedHookAddr);
+            aggregatorVault.grantHookRole(address(testHook));
+        }
+
+        // 5) Create a Uniswap V4 pool that uses testHook as its IHooks
         (poolKey, ) = initPool(
             tokenA,
             tokenB,
@@ -68,41 +94,44 @@ contract HookIntegrationTest is Test, Deployers {
             3000,
             MY_SQRT_PRICE_1_1
         );
+
+        console.log("HookIntegrationTest.setUp() done");
     }
 
-    /**
-     * @notice Tests a basic addLiquidity workflow.
-     */
-    function test_BasicAddLiquidity() public {
-        address user = address(9999);
-        // Transfer tokens to user for testing
-        MockERC20(Currency.unwrap(tokenA)).transfer(user, 10_000 ether);
-        MockERC20(Currency.unwrap(tokenB)).transfer(user, 10_000 ether);
+    ///////////////////////////////////////////////////////////////
+    //                 test_BasicAddLiquidity                    //
+    ///////////////////////////////////////////////////////////////
 
+    function test_BasicAddLiquidity() public {
+        console.log("test_BasicAddLiquidity start...");
+        // 1) user gets 10k of each token
+        address user = address(9999);
+        MockERC20(address(uint160(Currency.unwrap(tokenA)))).transfer(
+            user,
+            10_000 ether
+        );
+        MockERC20(address(uint160(Currency.unwrap(tokenB)))).transfer(
+            user,
+            10_000 ether
+        );
+
+        // 2) aggregatorVault shares before
         address asset0 = Currency.unwrap(tokenA);
         address asset1 = Currency.unwrap(tokenB);
 
-        // Snapshot aggregator's Aave/Veda balances before depositing
-        uint256 aaveBefore0 = aavePoolMock.suppliedBalances(
-            asset0,
-            address(testHook)
-        );
-        uint256 aaveBefore1 = aavePoolMock.suppliedBalances(
-            asset1,
-            address(testHook)
-        );
-        uint256 vedaBefore0 = vedaTellerMock.shareBalances(
-            asset0,
-            address(testHook)
-        );
-        uint256 vedaBefore1 = vedaTellerMock.shareBalances(
-            asset1,
-            address(testHook)
-        );
+        uint256 shBefore0 = aggregatorVault.totalShares(IERC20(asset0));
+        uint256 shBefore1 = aggregatorVault.totalShares(IERC20(asset1));
 
+        // 3) user calls addLiquidity on Hook
         vm.startPrank(user);
-        MockERC20(asset0).approve(address(testHook), type(uint256).max);
-        MockERC20(asset1).approve(address(testHook), type(uint256).max);
+        MockERC20(address(uint160(asset0))).approve(
+            address(testHook),
+            type(uint256).max
+        );
+        MockERC20(address(uint160(asset1))).approve(
+            address(testHook),
+            type(uint256).max
+        );
 
         Hook.LiquidityParams memory depositParams = Hook.LiquidityParams({
             fee: 3000,
@@ -112,73 +141,58 @@ contract HookIntegrationTest is Test, Deployers {
             amount1: 2000 ether,
             key: poolKey
         });
-
-        // Perform the addLiquidity call
         testHook.addLiquidity(depositParams);
-
         vm.stopPrank();
 
-        // Check aggregator's final Aave & Veda balances
-        uint256 aaveAfter0 = aavePoolMock.suppliedBalances(
-            asset0,
-            address(testHook)
+        // 4) aggregatorVault shares after
+        uint256 shAfter0 = aggregatorVault.totalShares(IERC20(asset0));
+        uint256 shAfter1 = aggregatorVault.totalShares(IERC20(asset1));
+
+        uint256 got0 = shAfter0 - shBefore0;
+        uint256 got1 = shAfter1 - shBefore1;
+        console.log(
+            "test_BasicAddLiquidity => aggregatorVault sharesGot0:",
+            got0
         );
-        uint256 aaveAfter1 = aavePoolMock.suppliedBalances(
-            asset1,
-            address(testHook)
-        );
-        uint256 vedaAfter0 = vedaTellerMock.shareBalances(
-            asset0,
-            address(testHook)
-        );
-        uint256 vedaAfter1 = vedaTellerMock.shareBalances(
-            asset1,
-            address(testHook)
+        console.log(
+            "test_BasicAddLiquidity => aggregatorVault sharesGot1:",
+            got1
         );
 
-        uint256 gotAave0 = aaveAfter0 - aaveBefore0;
-        uint256 gotAave1 = aaveAfter1 - aaveBefore1;
-        uint256 gotVeda0 = vedaAfter0 - vedaBefore0;
-        uint256 gotVeda1 = vedaAfter1 - vedaBefore1;
+        // Expect aggregator vault to have 4k of asset0, 2k of asset1 (assuming 1:1 mapping for shares)
+        assertEq(got0, 4000 ether, "Vault shares mismatch token0");
+        assertEq(got1, 2000 ether, "Vault shares mismatch token1");
 
-        // Validate that 25% of each token went to Aave, 75% to Veda
-        assertEq(gotAave0, 1000 ether, "AAVE aggregator for token0 mismatch");
-        assertEq(gotAave1, 500 ether, "AAVE aggregator for token1 mismatch");
-        assertEq(gotVeda0, 3000 ether, "Veda aggregator for token0 mismatch");
-        assertEq(gotVeda1, 1500 ether, "Veda aggregator for token1 mismatch");
+        console.log("test_BasicAddLiquidity done");
     }
 
-    /**
-     * @notice Tests addLiquidity with zero amounts, ensuring no tokens are deposited.
-     */
+    ///////////////////////////////////////////////////////////////
+    //                   test_ZeroDeposit                       //
+    ///////////////////////////////////////////////////////////////
+
     function test_ZeroDeposit() public {
+        console.log("test_ZeroDeposit start...");
+        // 1) user with some tokens
         address user = makeNewUserWithTokens(100 ether, 100 ether);
+
         address asset0 = Currency.unwrap(tokenA);
         address asset1 = Currency.unwrap(tokenB);
 
-        // Snapshot aggregator's Aave/Veda balances before depositing
-        uint256 aaveBefore0 = aavePoolMock.suppliedBalances(
-            asset0,
-            address(testHook)
-        );
-        uint256 vedaBefore0 = vedaTellerMock.shareBalances(
-            asset0,
-            address(testHook)
-        );
-        uint256 aaveBefore1 = aavePoolMock.suppliedBalances(
-            asset1,
-            address(testHook)
-        );
-        uint256 vedaBefore1 = vedaTellerMock.shareBalances(
-            asset1,
-            address(testHook)
-        );
+        // aggregatorVault shares before
+        uint256 shBefore0 = aggregatorVault.totalShares(IERC20(asset0));
+        uint256 shBefore1 = aggregatorVault.totalShares(IERC20(asset1));
 
+        // 2) user calls addLiquidity(0,0)
         vm.startPrank(user);
-        MockERC20(asset0).approve(address(testHook), type(uint256).max);
-        MockERC20(asset1).approve(address(testHook), type(uint256).max);
+        MockERC20(address(uint160(asset0))).approve(
+            address(testHook),
+            type(uint256).max
+        );
+        MockERC20(address(uint160(asset1))).approve(
+            address(testHook),
+            type(uint256).max
+        );
 
-        // Request 0 deposit for both tokens
         Hook.LiquidityParams memory depositParams = Hook.LiquidityParams({
             fee: 3000,
             currency0: tokenA,
@@ -188,81 +202,57 @@ contract HookIntegrationTest is Test, Deployers {
             key: poolKey
         });
         testHook.addLiquidity(depositParams);
-
         vm.stopPrank();
 
-        // Check aggregator's final Aave & Veda balances to confirm no changes
-        uint256 aaveAfter0 = aavePoolMock.suppliedBalances(
-            asset0,
-            address(testHook)
-        );
-        uint256 vedaAfter0 = vedaTellerMock.shareBalances(
-            asset0,
-            address(testHook)
-        );
-        uint256 aaveAfter1 = aavePoolMock.suppliedBalances(
-            asset1,
-            address(testHook)
-        );
-        uint256 vedaAfter1 = vedaTellerMock.shareBalances(
-            asset1,
-            address(testHook)
+        // aggregatorVault shares after
+        uint256 shAfter0 = aggregatorVault.totalShares(IERC20(asset0));
+        uint256 shAfter1 = aggregatorVault.totalShares(IERC20(asset1));
+
+        console.log(
+            "test_ZeroDeposit => checking aggregatorVault didn't get anything..."
         );
 
         assertEq(
-            aaveAfter0,
-            aaveBefore0,
+            shAfter0,
+            shBefore0,
             "Should not deposit anything when amount=0"
         );
         assertEq(
-            vedaAfter0,
-            vedaBefore0,
+            shAfter1,
+            shBefore1,
             "Should not deposit anything when amount=0"
         );
-        assertEq(
-            aaveAfter1,
-            aaveBefore1,
-            "Should not deposit anything when amount=0"
-        );
-        assertEq(
-            vedaAfter1,
-            vedaBefore1,
-            "Should not deposit anything when amount=0"
-        );
+
+        console.log("test_ZeroDeposit done");
     }
 
+    ///////////////////////////////////////////////////////////////
+    //     test_EdgeCase_AllOneTokenToVeda => aggregatorVault    //
+    ///////////////////////////////////////////////////////////////
+
     /**
-     * @notice Tests depositing only one token to Veda (tokenA only).
+     * @notice In the original code, we tested depositing only tokenA => 2000 ether.
+     * Here we replicate: user with 10k tokenA, 0 tokenB, then deposit => aggregatorVault.
      */
     function test_EdgeCase_AllOneTokenToVeda() public {
-        // Create user funded only with tokenA
+        console.log("test_EdgeCase_AllOneTokenToVeda start...");
+        // user => 10k tokenA, 0 tokenB
         address user = makeNewUserWithTokens(10000 ether, 0);
 
         address asset0 = Currency.unwrap(tokenA);
         address asset1 = Currency.unwrap(tokenB);
 
-        // Snapshot aggregator's Aave/Veda balances
-        uint256 aaveBefore0 = aavePoolMock.suppliedBalances(
-            asset0,
-            address(testHook)
-        );
-        uint256 vedaBefore0 = vedaTellerMock.shareBalances(
-            asset0,
-            address(testHook)
-        );
-        uint256 aaveBefore1 = aavePoolMock.suppliedBalances(
-            asset1,
-            address(testHook)
-        );
-        uint256 vedaBefore1 = vedaTellerMock.shareBalances(
-            asset1,
-            address(testHook)
-        );
+        // aggregatorVault shares before
+        uint256 shBefore0 = aggregatorVault.totalShares(IERC20(asset0));
+        uint256 shBefore1 = aggregatorVault.totalShares(IERC20(asset1));
 
+        // deposit only tokenA => 2000
         vm.startPrank(user);
-        MockERC20(asset0).approve(address(testHook), type(uint256).max);
+        MockERC20(address(uint160(asset0))).approve(
+            address(testHook),
+            type(uint256).max
+        );
 
-        // Deposit only tokenA => 2000
         Hook.LiquidityParams memory depositParams = Hook.LiquidityParams({
             fee: 3000,
             currency0: tokenA,
@@ -272,47 +262,54 @@ contract HookIntegrationTest is Test, Deployers {
             key: poolKey
         });
         testHook.addLiquidity(depositParams);
+
         vm.stopPrank();
 
-        // Check aggregator's final Aave & Veda balances
-        uint256 aaveAfter0 = aavePoolMock.suppliedBalances(
-            asset0,
-            address(testHook)
+        // aggregatorVault shares after
+        uint256 shAfter0 = aggregatorVault.totalShares(IERC20(asset0));
+        uint256 shAfter1 = aggregatorVault.totalShares(IERC20(asset1));
+
+        console.log(
+            "test_EdgeCase_AllOneTokenToVeda => aggregatorVault got tokenA shares:",
+            shAfter0 - shBefore0
         );
-        uint256 vedaAfter0 = vedaTellerMock.shareBalances(
-            asset0,
-            address(testHook)
-        );
-        uint256 aaveAfter1 = aavePoolMock.suppliedBalances(
-            asset1,
-            address(testHook)
-        );
-        uint256 vedaAfter1 = vedaTellerMock.shareBalances(
-            asset1,
-            address(testHook)
+        console.log(
+            "test_EdgeCase_AllOneTokenToVeda => aggregatorVault got tokenB shares:",
+            shAfter1 - shBefore1
         );
 
-        // Expect 25% => Aave, 75% => Veda for tokenA. B is untouched.
-        assertEq(aaveAfter0 - aaveBefore0, 500 ether, "Expect 25% in Aave");
-        assertEq(vedaAfter0 - vedaBefore0, 1500 ether, "Expect 75% in Veda");
-        assertEq(aaveAfter1 - aaveBefore1, 0, "No deposit for tokenB => 0");
-        assertEq(vedaAfter1 - vedaBefore1, 0, "No deposit for tokenB => 0");
+        // Expect aggregatorVault to have +2000 tokenA shares, +0 for tokenB
+        assertEq(
+            shAfter0 - shBefore0,
+            2000 ether,
+            "Expect aggregatorVault to hold tokenA=2000"
+        );
+        assertEq(
+            shAfter1 - shBefore1,
+            0,
+            "Expect aggregatorVault to hold tokenB=0"
+        );
+
+        console.log("test_EdgeCase_AllOneTokenToVeda done");
     }
 
-    /**
-     * @notice Tests a scenario where the user doesn't have enough tokens to fulfill transferFrom.
-     */
+    ///////////////////////////////////////////////////////////////
+    //               test_InsufficientBalance                   //
+    ///////////////////////////////////////////////////////////////
+
     function test_InsufficientBalance() public {
-        // User has only 100 A, 50 B
+        console.log("test_InsufficientBalance start...");
+        // user => 100A, 50B
         address user = makeNewUserWithTokens(100 ether, 50 ether);
 
         vm.startPrank(user);
-        MockERC20(Currency.unwrap(tokenA)).approve(
+        // Approve
+        MockERC20(address(uint160(Currency.unwrap(tokenA)))).approve(
             address(testHook),
             type(uint256).max
         );
 
-        // Attempt to deposit 200 A => should revert
+        // Attempt deposit => 200A
         Hook.LiquidityParams memory depositParams = Hook.LiquidityParams({
             fee: 3000,
             currency0: tokenA,
@@ -322,43 +319,40 @@ contract HookIntegrationTest is Test, Deployers {
             key: poolKey
         });
 
-        vm.expectRevert(); // transferFrom fails
+        vm.expectRevert();
         testHook.addLiquidity(depositParams);
+
         vm.stopPrank();
+        console.log("test_InsufficientBalance done");
     }
 
-    /**
-     * @notice Tests adding liquidity multiple times from the same user.
-     */
+    ///////////////////////////////////////////////////////////////
+    //            test_ReAddLiquiditySameUser                   //
+    ///////////////////////////////////////////////////////////////
+
     function test_ReAddLiquiditySameUser() public {
+        console.log("test_ReAddLiquiditySameUser start...");
+        // user => 5k each
         address user = makeNewUserWithTokens(5000 ether, 5000 ether);
 
         address asset0 = Currency.unwrap(tokenA);
         address asset1 = Currency.unwrap(tokenB);
 
-        // Snapshot aggregator's Aave/Veda balances
-        uint256 aaveBefore0 = aavePoolMock.suppliedBalances(
-            asset0,
-            address(testHook)
-        );
-        uint256 aaveBefore1 = aavePoolMock.suppliedBalances(
-            asset1,
-            address(testHook)
-        );
-        uint256 vedaBefore0 = vedaTellerMock.shareBalances(
-            asset0,
-            address(testHook)
-        );
-        uint256 vedaBefore1 = vedaTellerMock.shareBalances(
-            asset1,
-            address(testHook)
-        );
+        // aggregatorVault shares before
+        uint256 shBefore0 = aggregatorVault.totalShares(IERC20(asset0));
+        uint256 shBefore1 = aggregatorVault.totalShares(IERC20(asset1));
 
         vm.startPrank(user);
-        MockERC20(asset0).approve(address(testHook), type(uint256).max);
-        MockERC20(asset1).approve(address(testHook), type(uint256).max);
+        MockERC20(address(uint160(asset0))).approve(
+            address(testHook),
+            type(uint256).max
+        );
+        MockERC20(address(uint160(asset1))).approve(
+            address(testHook),
+            type(uint256).max
+        );
 
-        // First deposit => 1000 A, 1000 B
+        // First deposit => 1000A, 1000B
         testHook.addLiquidity(
             Hook.LiquidityParams({
                 fee: 3000,
@@ -370,7 +364,7 @@ contract HookIntegrationTest is Test, Deployers {
             })
         );
 
-        // Second deposit => 2000 A, 500 B
+        // Second deposit => 2000A, 500B
         testHook.addLiquidity(
             Hook.LiquidityParams({
                 fee: 3000,
@@ -383,65 +377,54 @@ contract HookIntegrationTest is Test, Deployers {
         );
         vm.stopPrank();
 
-        // Check aggregator's final Aave & Veda balances
-        uint256 aaveAfter0 = aavePoolMock.suppliedBalances(
-            asset0,
-            address(testHook)
+        // aggregatorVault shares after
+        uint256 shAfter0 = aggregatorVault.totalShares(IERC20(asset0));
+        uint256 shAfter1 = aggregatorVault.totalShares(IERC20(asset1));
+
+        console.log(
+            "test_ReAddLiquiditySameUser => aggregatorVault net shares for tokenA:",
+            shAfter0 - shBefore0
         );
-        uint256 aaveAfter1 = aavePoolMock.suppliedBalances(
-            asset1,
-            address(testHook)
-        );
-        uint256 vedaAfter0 = vedaTellerMock.shareBalances(
-            asset0,
-            address(testHook)
-        );
-        uint256 vedaAfter1 = vedaTellerMock.shareBalances(
-            asset1,
-            address(testHook)
+        console.log(
+            "test_ReAddLiquiditySameUser => aggregatorVault net shares for tokenB:",
+            shAfter1 - shBefore1
         );
 
-        // Expect 25% => Aave, 75% => Veda of total 3000 A (750 A => Aave, 2250 => Veda)
-        // and 1500 B (375 B => Aave, 1125 => Veda)
+        // user deposited total 3000 A, 1500 B
+        // aggregatorVault should hold those shares if 1:1
         assertEq(
-            aaveAfter0 - aaveBefore0,
-            750 ether,
-            "Should see 750 in Aave for tokenA"
+            shAfter0 - shBefore0,
+            3000 ether,
+            "Should see +3000 aggregatorVault shares for tokenA"
         );
         assertEq(
-            aaveAfter1 - aaveBefore1,
-            375 ether,
-            "Should see 375 in Aave for tokenB"
+            shAfter1 - shBefore1,
+            1500 ether,
+            "Should see +1500 aggregatorVault shares for tokenB"
         );
-        assertEq(
-            vedaAfter0 - vedaBefore0,
-            2250 ether,
-            "Should see 2250 in Veda for tokenA"
-        );
-        assertEq(
-            vedaAfter1 - vedaBefore1,
-            1125 ether,
-            "Should see 1125 in Veda for tokenB"
-        );
+
+        console.log("test_ReAddLiquiditySameUser done");
     }
 
-    /**
-     * @notice Tests adding liquidity with extra hookData, ensuring no effect on deposit logic.
-     */
+    ///////////////////////////////////////////////////////////////
+    //    test_AddLiquidity_NoEffectWithHookData                //
+    ///////////////////////////////////////////////////////////////
+
     function test_AddLiquidity_NoEffectWithHookData() public {
+        console.log("test_AddLiquidity_NoEffectWithHookData start...");
         address user = makeNewUserWithTokens(2000 ether, 2000 ether);
 
         vm.startPrank(user);
-        MockERC20(Currency.unwrap(tokenA)).approve(
+        MockERC20(address(uint160(Currency.unwrap(tokenA)))).approve(
             address(testHook),
             2000 ether
         );
-        MockERC20(Currency.unwrap(tokenB)).approve(
+        MockERC20(address(uint160(Currency.unwrap(tokenB)))).approve(
             address(testHook),
             2000 ether
         );
 
-        // This customData is not used in the current Hook logic
+        // "metadata" that our Hook doesn't specifically use
         bytes memory customData = abi.encode("some instructions", 42, true);
 
         Hook.LiquidityParams memory depositParams = Hook.LiquidityParams({
@@ -456,93 +439,76 @@ contract HookIntegrationTest is Test, Deployers {
         testHook.addLiquidity(depositParams);
         vm.stopPrank();
 
-        // Just ensure no revert occurred; no functional effect.
+        console.log("No revert => success");
         assertTrue(true, "Add liquidity with custom data does not revert");
     }
 
-    /**
-     * @notice Utility: creates a new user and funds them with amtA of tokenA and amtB of tokenB.
-     * @param amtA The amount of tokenA to grant the user.
-     * @param amtB The amount of tokenB to grant the user.
-     * @return user Address of the newly created user.
-     */
-    function makeNewUserWithTokens(
-        uint256 amtA,
-        uint256 amtB
-    ) internal returns (address user) {
-        user = address(
-            uint160(
-                uint256(
-                    keccak256(abi.encodePacked(block.timestamp, amtA, amtB))
-                )
-            )
-        );
-        MockERC20(Currency.unwrap(tokenA)).transfer(user, amtA);
-        MockERC20(Currency.unwrap(tokenB)).transfer(user, amtB);
-        return user;
-    }
+    ///////////////////////////////////////////////////////////////
+    //                (F) test_BasicSwap_With_JIT               //
+    ///////////////////////////////////////////////////////////////
 
     /**
-     * @notice Demonstrates a basic two-swap scenario with JIT liquidity from the aggregator.
-     *         First swap is A => B, second is B => A.
+     * @notice We replicate the original scenario:
+     *     - aggregator deposits ~500 of A and B
+     *     - swapper does two swaps (A => B, then B => A)
+     *     - Hook does a JIT deposit/withdraw from aggregatorVault in beforeSwap/afterSwap
      */
     function test_BasicSwap_With_JIT() public {
-        // Create a swapper with 2000 A and 2000 B
+        console.log("test_BasicSwap_With_JIT => start...");
+        // 1) create swapper with 2k A, 2k B
         address swapper = makeNewUserWithTokens(2_000 ether, 2_000 ether);
+        console.log("   swapper =>", swapper);
 
-        // Create aggregator's deposit user with 10000 A, 10000 B, but only 500 actually used
+        // aggregator's "depositor" => 10k each but will deposit 500 each
         address depositor = makeNewUserWithTokens(10_000 ether, 10_000 ether);
+        console.log("   depositor =>", depositor);
 
-        // Transfer a small seed to the Hook contract
-        MockERC20(Currency.unwrap(tokenA)).transfer(
-            address(testHook),
-            50 ether
-        );
-        MockERC20(Currency.unwrap(tokenB)).transfer(
-            address(testHook),
-            50 ether
-        );
-
-        // Aggregator deposits ~500 each (scaled down from 5000 => 500 to avoid overflow)
+        // 2) aggregator seeds Hook with deposit => 5000 => scaled to 500
         vm.startPrank(depositor);
-        MockERC20(Currency.unwrap(tokenA)).approve(
+
+        // Approve to Hook
+        MockERC20(address(uint160(Currency.unwrap(tokenA)))).approve(
             address(testHook),
             type(uint256).max
         );
-        MockERC20(Currency.unwrap(tokenB)).approve(
+        MockERC20(address(uint160(Currency.unwrap(tokenB)))).approve(
             address(testHook),
             type(uint256).max
         );
+
+        // deposit ~5000 => effectively 500
         testHook.addLiquidity(
             Hook.LiquidityParams({
                 fee: poolKey.fee,
                 currency0: tokenA,
                 currency1: tokenB,
-                amount0: 5000 ether, // scaled
-                amount1: 5000 ether, // scaled
+                amount0: 5000 ether,
+                amount1: 5000 ether,
                 key: poolKey
             })
         );
         vm.stopPrank();
 
-        // Snapshot aggregator's Aave balances before the first swap
-        uint256 aaveBeforeA = aavePoolMock.suppliedBalances(
-            Currency.unwrap(tokenA),
-            address(testHook)
+        // aggregatorVault shares after deposit
+        uint256 vaultA_beforeSwap = aggregatorVault.totalShares(
+            IERC20(Currency.unwrap(tokenA))
         );
-        uint256 aaveBeforeB = aavePoolMock.suppliedBalances(
-            Currency.unwrap(tokenB),
-            address(testHook)
+        uint256 vaultB_beforeSwap = aggregatorVault.totalShares(
+            IERC20(Currency.unwrap(tokenB))
+        );
+        console.log(
+            "test_BasicSwap_With_JIT: aggregatorVault shares => tokenA:%s, tokenB:%s",
+            vaultA_beforeSwap,
+            vaultB_beforeSwap
         );
 
-        // First swap: user swaps A => B
+        // 3) swapper => first swap A => B
         vm.startPrank(swapper);
-
-        MockERC20(Currency.unwrap(tokenA)).approve(
+        MockERC20(address(uint160(Currency.unwrap(tokenA)))).approve(
             address(swapRouter),
             type(uint256).max
         );
-        MockERC20(Currency.unwrap(tokenB)).approve(
+        MockERC20(address(uint160(Currency.unwrap(tokenB)))).approve(
             address(swapRouter),
             type(uint256).max
         );
@@ -562,28 +528,29 @@ contract HookIntegrationTest is Test, Deployers {
         PoolSwapTest.TestSettings memory testSettings = PoolSwapTest
             .TestSettings({takeClaims: false, settleUsingBurn: false});
 
+        console.log("=== test_BasicSwap_With_JIT => first swap (A => B) ===");
         swapRouter.swap(poolKey, swapParams, testSettings, bytes(""));
-
-        // final user balances after first swap (not specifically checked, but no revert)
-        uint256 swapperAAfter1 = MockERC20(Currency.unwrap(tokenA)).balanceOf(
-            swapper
-        );
-        uint256 swapperBAfter1 = MockERC20(Currency.unwrap(tokenB)).balanceOf(
-            swapper
-        );
         vm.stopPrank();
 
-        // aggregator's Aave balances after first swap
-        uint256 aaveMidA = aavePoolMock.suppliedBalances(
-            Currency.unwrap(tokenA),
-            address(testHook)
+        // aggregatorVault shares mid-swap
+        uint256 vaultA_midSwap = aggregatorVault.totalShares(
+            IERC20(Currency.unwrap(tokenA))
         );
-        uint256 aaveMidB = aavePoolMock.suppliedBalances(
-            Currency.unwrap(tokenB),
-            address(testHook)
+        uint256 vaultB_midSwap = aggregatorVault.totalShares(
+            IERC20(Currency.unwrap(tokenB))
+        );
+        console.log(
+            "After first swap => aggregatorVault tokenA: %s => %s",
+            vaultA_beforeSwap,
+            vaultA_midSwap
+        );
+        console.log(
+            "After first swap => aggregatorVault tokenB: %s => %s",
+            vaultB_beforeSwap,
+            vaultB_midSwap
         );
 
-        // Second swap: user swaps B => A
+        // 4) second swap => B => A
         bool zeroForOne2 = false; // B => A
         int256 amountSpecified2 = 5000 ether;
         uint160 priceLimit2 = zeroForOne2
@@ -596,42 +563,71 @@ contract HookIntegrationTest is Test, Deployers {
             sqrtPriceLimitX96: priceLimit2
         });
 
+        console.log("=== test_BasicSwap_With_JIT => second swap (B => A) ===");
         vm.startPrank(swapper);
-        uint256 swapperABefore2 = MockERC20(Currency.unwrap(tokenA)).balanceOf(
-            swapper
-        );
-        uint256 swapperBBefore2 = MockERC20(Currency.unwrap(tokenB)).balanceOf(
-            swapper
-        );
-
         swapRouter.swap(poolKey, swapParams2, testSettings, bytes(""));
-
-        uint256 swapperAAfter2 = MockERC20(Currency.unwrap(tokenA)).balanceOf(
-            swapper
-        );
-        uint256 swapperBAfter2 = MockERC20(Currency.unwrap(tokenB)).balanceOf(
-            swapper
-        );
-
         vm.stopPrank();
 
-        // aggregator's Aave balances after second swap
-        uint256 aaveAfterA = aavePoolMock.suppliedBalances(
-            Currency.unwrap(tokenA),
-            address(testHook)
+        // aggregatorVault shares after second swap
+        uint256 vaultA_afterSwap = aggregatorVault.totalShares(
+            IERC20(Currency.unwrap(tokenA))
         );
-        uint256 aaveAfterB = aavePoolMock.suppliedBalances(
-            Currency.unwrap(tokenB),
-            address(testHook)
+        uint256 vaultB_afterSwap = aggregatorVault.totalShares(
+            IERC20(Currency.unwrap(tokenB))
+        );
+        console.log(
+            "After second swap => aggregatorVault tokenA: %s => %s",
+            vaultA_midSwap,
+            vaultA_afterSwap
+        );
+        console.log(
+            "After second swap => aggregatorVault tokenB: %s => %s",
+            vaultB_midSwap,
+            vaultB_afterSwap
         );
 
-        // Verify aggregator's final Aave balances changed from the initial deposit
-        bool changedA = (aaveAfterA != aaveBeforeA);
-        bool changedB = (aaveAfterB != aaveBeforeB);
+        bool changedA = (vaultA_afterSwap != vaultA_beforeSwap);
+        bool changedB = (vaultB_afterSwap != vaultB_beforeSwap);
 
+        console.log(
+            "test_BasicSwap_With_JIT => aggregatorVault final shares (tokenA=%s, tokenB=%s)",
+            vaultA_afterSwap,
+            vaultB_afterSwap
+        );
         assertTrue(
             changedA || changedB,
-            "Expect aggregator's Aave balance to change from JIT usage"
+            "Expect aggregatorVault share balances to change from JIT usage"
         );
+
+        console.log("test_BasicSwap_With_JIT done");
+    }
+
+    ///////////////////////////////////////////////////////////////
+    //                Helper: makeNewUserWithTokens             //
+    ///////////////////////////////////////////////////////////////
+
+    /**
+     * @notice Helper that creates a user and transfers them amtA & amtB.
+     */
+    function makeNewUserWithTokens(
+        uint256 amtA,
+        uint256 amtB
+    ) internal returns (address user) {
+        user = address(
+            uint160(
+                uint256(
+                    keccak256(abi.encodePacked(block.timestamp, amtA, amtB))
+                )
+            )
+        );
+        MockERC20(address(uint160(Currency.unwrap(tokenA)))).transfer(
+            user,
+            amtA
+        );
+        MockERC20(address(uint160(Currency.unwrap(tokenB)))).transfer(
+            user,
+            amtB
+        );
+        return user;
     }
 }
