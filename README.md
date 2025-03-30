@@ -87,6 +87,7 @@ flowchart LR
 .
 ├── src
 │   └── Hook.sol                # Primary Hook logic for JIT liquidity & aggregatorVault integration
+│   └── HookVault.sol           # Vault which locks the user's funds and source of liquidity for various trading strategies
 ├── test
 │   └── HookIntegration.t.sol   # Integration tests verifying deposit, JIT swaps, etc.
 ├── foundry.toml                # Foundry configuration
