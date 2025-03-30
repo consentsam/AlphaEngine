@@ -63,20 +63,15 @@ contract HookIntegrationTest is Test, Deployers {
     function setUp() public {
         console.log("HookIntegrationTest.setUp() start...");
 
-        // 1) Deploy manager & routers from the Deployers library
         deployFreshManagerAndRouters();
         pm = PoolManager(address(manager));
 
-        // 2) Deploy & mint two tokens (tokenA, tokenB)
         (tokenA, tokenB) = deployMintAndApprove2Currencies();
 
-        // 3) aggregatorVault: the new multi-asset vault
         aggregatorVault = new HookVault();
 
-        // 4) Deploy Hook with references to pm + aggregatorVault
         {
             address flaggedHookAddr = address(uint160(0x8C0));
-            // We'll encode the constructor arguments: (PoolManager, HookVault)
             deployCodeTo(
                 "Hook",
                 abi.encode(pm, aggregatorVault),
@@ -86,7 +81,6 @@ contract HookIntegrationTest is Test, Deployers {
             aggregatorVault.grantHookRole(address(testHook));
         }
 
-        // 5) Create a Uniswap V4 pool that uses testHook as its IHooks
         (poolKey, ) = initPool(
             tokenA,
             tokenB,
@@ -98,13 +92,11 @@ contract HookIntegrationTest is Test, Deployers {
         console.log("HookIntegrationTest.setUp() done");
     }
 
-    ///////////////////////////////////////////////////////////////
-    //                 test_BasicAddLiquidity                    //
-    ///////////////////////////////////////////////////////////////
-
+    // ----------------------------------------------------------
+    // test_BasicAddLiquidity
+    // ----------------------------------------------------------
     function test_BasicAddLiquidity() public {
         console.log("test_BasicAddLiquidity start...");
-        // 1) user gets 10k of each token
         address user = address(9999);
         MockERC20(address(uint160(Currency.unwrap(tokenA)))).transfer(
             user,
@@ -115,14 +107,12 @@ contract HookIntegrationTest is Test, Deployers {
             10_000 ether
         );
 
-        // 2) aggregatorVault shares before
         address asset0 = Currency.unwrap(tokenA);
         address asset1 = Currency.unwrap(tokenB);
 
         uint256 shBefore0 = aggregatorVault.totalShares(IERC20(asset0));
         uint256 shBefore1 = aggregatorVault.totalShares(IERC20(asset1));
 
-        // 3) user calls addLiquidity on Hook
         vm.startPrank(user);
         MockERC20(address(uint160(asset0))).approve(
             address(testHook),
@@ -144,22 +134,14 @@ contract HookIntegrationTest is Test, Deployers {
         testHook.addLiquidity(depositParams);
         vm.stopPrank();
 
-        // 4) aggregatorVault shares after
         uint256 shAfter0 = aggregatorVault.totalShares(IERC20(asset0));
         uint256 shAfter1 = aggregatorVault.totalShares(IERC20(asset1));
 
         uint256 got0 = shAfter0 - shBefore0;
         uint256 got1 = shAfter1 - shBefore1;
-        console.log(
-            "test_BasicAddLiquidity => aggregatorVault sharesGot0:",
-            got0
-        );
-        console.log(
-            "test_BasicAddLiquidity => aggregatorVault sharesGot1:",
-            got1
-        );
+        console.log("sharesGot0:", got0);
+        console.log("sharesGot1:", got1);
 
-        // Expect aggregator vault to have 4k of asset0, 2k of asset1 (assuming 1:1 mapping for shares)
         assertEq(got0, 4000 ether, "Vault shares mismatch token0");
         assertEq(got1, 2000 ether, "Vault shares mismatch token1");
 
@@ -170,29 +152,18 @@ contract HookIntegrationTest is Test, Deployers {
     //                   test_ZeroDeposit                       //
     ///////////////////////////////////////////////////////////////
 
+    /**
+     * @notice Updated test case that verifies a revert when `amount0 == 0 && amount1 == 0`.
+     *         The revert message is "No tokens to deposit".
+     */
     function test_ZeroDeposit() public {
         console.log("test_ZeroDeposit start...");
-        // 1) user with some tokens
         address user = makeNewUserWithTokens(100 ether, 100 ether);
 
-        address asset0 = Currency.unwrap(tokenA);
-        address asset1 = Currency.unwrap(tokenB);
+        // We'll skip aggregatorVault shares snapshot, since we expect the call to revert
+        console.log("   user =>", user);
 
-        // aggregatorVault shares before
-        uint256 shBefore0 = aggregatorVault.totalShares(IERC20(asset0));
-        uint256 shBefore1 = aggregatorVault.totalShares(IERC20(asset1));
-
-        // 2) user calls addLiquidity(0,0)
-        vm.startPrank(user);
-        MockERC20(address(uint160(asset0))).approve(
-            address(testHook),
-            type(uint256).max
-        );
-        MockERC20(address(uint160(asset1))).approve(
-            address(testHook),
-            type(uint256).max
-        );
-
+        // Prepare deposit with 0 for both amounts
         Hook.LiquidityParams memory depositParams = Hook.LiquidityParams({
             fee: 3000,
             currency0: tokenA,
@@ -201,28 +172,19 @@ contract HookIntegrationTest is Test, Deployers {
             amount1: 0,
             key: poolKey
         });
+
+        // CODE_UPDATED_HERE: Expect a revert with specific message
+        vm.startPrank(user);
+        // We use `vm.expectRevert(bytes("No tokens to deposit"));`
+        // or `vm.expectRevert(abi.encodePacked("No tokens to deposit"));`
+        // The shorter approach:
+        vm.expectRevert(bytes("No tokens to deposit"));
         testHook.addLiquidity(depositParams);
         vm.stopPrank();
 
-        // aggregatorVault shares after
-        uint256 shAfter0 = aggregatorVault.totalShares(IERC20(asset0));
-        uint256 shAfter1 = aggregatorVault.totalShares(IERC20(asset1));
-
         console.log(
-            "test_ZeroDeposit => checking aggregatorVault didn't get anything..."
+            "test_ZeroDeposit => tested revert with 'No tokens to deposit'"
         );
-
-        assertEq(
-            shAfter0,
-            shBefore0,
-            "Should not deposit anything when amount=0"
-        );
-        assertEq(
-            shAfter1,
-            shBefore1,
-            "Should not deposit anything when amount=0"
-        );
-
         console.log("test_ZeroDeposit done");
     }
 
