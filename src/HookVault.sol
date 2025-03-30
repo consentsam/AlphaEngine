@@ -81,10 +81,10 @@ contract HookVault is AccessControl, ReentrancyGuard {
      * @param shares Number of vault shares minted to `account`.
      */
     event Deposit(
-        address indexed hook,
+        address hook,
         address indexed account,
         IERC20 indexed token,
-        uint256 amount,
+        uint256 indexed amount,
         uint256 shares
     );
 
@@ -97,10 +97,10 @@ contract HookVault is AccessControl, ReentrancyGuard {
      * @param shares Number of vault shares burned.
      */
     event Withdraw(
-        address indexed hook,
+        address hook,
         address indexed account,
         IERC20 indexed token,
-        uint256 amount,
+        uint256 indexed amount,
         uint256 shares
     );
 
@@ -137,6 +137,8 @@ contract HookVault is AccessControl, ReentrancyGuard {
     ) external onlyRole(HOOK_ROLE) nonReentrant returns (uint256 shares) {
         require(account != address(0), "Invalid account");
         require(amount > 0, "Deposit amount must be > 0");
+        // Token address must be non-zero
+        require(address(token) != address(0), "Invalid token");
 
         // Current token balance in this vault
         uint256 vaultBalance = token.balanceOf(address(this));
@@ -179,6 +181,13 @@ contract HookVault is AccessControl, ReentrancyGuard {
         require(account != address(0), "Invalid account");
         require(shares > 0, "Shares must be > 0");
         require(shareBalance[token][account] >= shares, "Not enough shares");
+         // Token address must be non-zero
+        require(address(token) != address(0), "Invalid token");
+        // Current token balance in this vault
+        require(
+            token.balanceOf(address(this)) > 0,
+            "Vault balance must be > 0"
+        );
 
         uint256 vaultBalance = token.balanceOf(address(this));
         uint256 currentTotalShares = totalShares[token];
