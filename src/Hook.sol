@@ -1,6 +1,10 @@
+// CODE_UPDATED_HERE: file path relative to your repo
 // ./src/Hook.sol
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.24;
+
+// CODE_UPDATED_HERE: unify on OpenZeppelin's IERC20
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {BaseHook} from "../lib/v4-periphery/src/base/hooks/BaseHook.sol";
 import {IPoolManager} from "../lib/v4-periphery/lib/v4-core/src/interfaces/IPoolManager.sol";
@@ -16,15 +20,14 @@ import {TickMath} from "../lib/v4-periphery/lib/v4-core/src/libraries/TickMath.s
 import {StateLibrary} from "../lib/v4-periphery/lib/v4-core/src/libraries/StateLibrary.sol";
 import {CurrencySettler} from "../lib/v4-periphery/lib/v4-core/test/utils/CurrencySettler.sol";
 
-import {IPool} from "./interfaces/IPool.sol";
-import {ITellerWithMultiAssetSupport} from "./interfaces/ITellerWithMultiAssetSupport.sol";
-import {IERC20} from "./interfaces/IERC20.sol";
+import {console} from "forge-std/console.sol";
+
+// CODE_UPDATED_HERE: Import your aggregator vault (HookVault)
+import {HookVault} from "./HookVault.sol";
 
 /**
  * @title Hook
- * @notice Demonstrates a Just-In-Time liquidity strategy:
- *         1) During addLiquidity, 25% goes to Aave, 75% goes to Veda aggregator.
- *         2) During swaps, we withdraw from Aave, add narrow-range liquidity, then remove it post-swap.
+ * @notice Demonstrates a Just-In-Time liquidity strategy, updated to unify IERC20 references using OpenZeppelin.
  */
 contract Hook is BaseHook {
     using CurrencyLibrary for Currency;
@@ -32,34 +35,24 @@ contract Hook is BaseHook {
     using StateLibrary for IPoolManager;
     using CurrencySettler for Currency;
 
-    /// @notice Address of a mocked lending protocol, e.g. Aave.
-    IPool public lendingProtocol;
-    /// @notice A mock aggregator that receives 75% of tokens upon deposit.
-    ITellerWithMultiAssetSupport public vedaTeller;
+    // ------------------------------------------------------------
+    // CODE_UPDATED_HERE: aggregatorVault
+    // ------------------------------------------------------------
+    HookVault public aggregatorVault; // The multi-asset vault
 
     bool private liquidityInitialized;
 
-    /// @dev The ratio that is staked into Aave in addLiquidity. (25% => Aave)
-    uint256 internal constant AAVE_PERCENT = 25;
-    /// @dev The ratio that is staked into Veda aggregator in addLiquidity. (75% => Veda)
-    uint256 internal constant VEDA_PERCENT = 75;
-
-    /// @dev These ticks define the ephemeral JIT range inserted during a swap.
+    // ephemeral JIT range
     int24 public tickLower;
     int24 public tickUpper;
-
-    /// @dev Tracks how much liquidity is currently added in the ephemeral range.
     uint128 private liquidityAdded;
 
-    /// @dev Optional record-keeping for user aggregator shares.
+    // Example user -> token => shares (just for your own tracking)
     mapping(address => mapping(address => uint256)) public userTokenShares;
     mapping(address => uint256) public totalTokenShares;
 
     error PoolNotInitialized();
 
-    /**
-     * @notice Params used when adding liquidity to the aggregator.
-     */
     struct LiquidityParams {
         uint24 fee;
         Currency currency0;
@@ -69,24 +62,18 @@ contract Hook is BaseHook {
         PoolKey key;
     }
 
-    /**
-     * @notice Sets up the Hook contract, linking it to a PoolManager, an Aave-like lending protocol, and a Veda aggregator.
-     * @param _manager Reference to the Uniswap v4 PoolManager.
-     * @param _lendingProtocol Mocked Aave pool.
-     * @param _vedaTeller Mocked aggregator for Veda.
-     */
+    // ------------------------------------------------------------
+    // Constructor
+    // ------------------------------------------------------------
     constructor(
         IPoolManager _manager,
-        address _lendingProtocol,
-        address _vedaTeller
+        HookVault _aggregatorVault
     ) BaseHook(_manager) {
-        lendingProtocol = IPool(_lendingProtocol);
-        vedaTeller = ITellerWithMultiAssetSupport(_vedaTeller);
+        aggregatorVault = _aggregatorVault;
     }
 
     /**
-     * @notice Returns the required hook permissions for this contract.
-     * @return Hooks.Permissions Memory struct detailing which hook functions are enabled.
+     * @notice Hook permissions
      */
     function getHookPermissions()
         public
@@ -113,88 +100,90 @@ contract Hook is BaseHook {
             });
     }
 
-    /**
-     * @notice Allows a user to add liquidity to the aggregator. Splits deposits into Aave (25%) and Veda aggregator (75%).
-     * @param params Struct detailing the token amounts, fee, and poolKey details.
-     */
+    // ------------------------------------------------------------
+    // (A) addLiquidity => aggregatorVault
+    // ------------------------------------------------------------
     function addLiquidity(LiquidityParams calldata params) external {
+        console.log("Hook.addLiquidity() called by =>", msg.sender);
+
         require(
             params.amount0 > 0 || params.amount1 > 0,
             "No tokens to deposit"
         );
 
-        // Pull tokens from the user => this contract.
+        // Identify the underlying token addresses
         address asset0 = Currency.unwrap(params.currency0);
         address asset1 = Currency.unwrap(params.currency1);
 
+        console.log(" addLiquidity: asset0 =>", asset0);
+        console.log(" addLiquidity: asset1 =>", asset1);
+
+        // ------------------------------------------------------------
+        // CODE_UPDATED_HERE: The Hook pulls tokens from the user -> Hook
+        // then the Hook approves aggregatorVault, then aggregatorVault pulls from Hook
+        // ------------------------------------------------------------
+
+        // (1) If user wants to deposit token0
         if (params.amount0 > 0) {
-            bool ok0 = IERC20(asset0).transferFrom(
+            console.log(" aggregatorVault.deposit token0 =>", params.amount0);
+
+            // Step A: transferFrom user => Hook
+            IERC20(asset0).transferFrom(
                 msg.sender,
                 address(this),
                 params.amount0
             );
-            require(ok0, "transferFrom(token0) failed");
+
+            // Step B: Hook approves aggregatorVault
+            IERC20(asset0).approve(address(aggregatorVault), params.amount0);
+
+            // Step C: aggregatorVault.deposit(token0, address(this), amount0)
+            aggregatorVault.deposit(
+                IERC20(asset0),
+                address(this),
+                params.amount0
+            );
+
+            // Track user "virtual" shares
+            userTokenShares[msg.sender][asset0] += params.amount0;
+            totalTokenShares[asset0] += params.amount0;
         }
+
+        // (2) If user wants to deposit token1
         if (params.amount1 > 0) {
-            bool ok1 = IERC20(asset1).transferFrom(
+            console.log(" aggregatorVault.deposit token1 =>", params.amount1);
+
+            // Step A: transferFrom user => Hook
+            IERC20(asset1).transferFrom(
                 msg.sender,
                 address(this),
                 params.amount1
             );
-            require(ok1, "transferFrom(token1) failed");
-        }
 
-        // Calculate how much goes to Aave vs. Veda aggregator.
-        uint256 toAave0 = (params.amount0 * AAVE_PERCENT) / 100;
-        uint256 toAave1 = (params.amount1 * AAVE_PERCENT) / 100;
-        uint256 toVeda0 = (params.amount0 * VEDA_PERCENT) / 100;
-        uint256 toVeda1 = (params.amount1 * VEDA_PERCENT) / 100;
+            // Step B: Hook approves aggregatorVault
+            IERC20(asset1).approve(address(aggregatorVault), params.amount1);
 
-        // Supply the appropriate portion to Aave (if non-zero).
-        if (toAave0 > 0) {
-            IERC20(asset0).approve(address(lendingProtocol), toAave0);
-            try lendingProtocol.supply(asset0, toAave0, address(this), 0) {
-                // No additional action on success
-            } catch {
-                // Swallow any error for demonstration
-            }
-        }
-        if (toAave1 > 0) {
-            IERC20(asset1).approve(address(lendingProtocol), toAave1);
-            try lendingProtocol.supply(asset1, toAave1, address(this), 0) {
-                // No additional action on success
-            } catch {
-                // Swallow any error for demonstration
-            }
-        }
+            // Step C: aggregatorVault.deposit(token1, address(this), amount1)
+            aggregatorVault.deposit(
+                IERC20(asset1),
+                address(this),
+                params.amount1
+            );
 
-        // Deposit the rest into Veda aggregator.
-        if (toVeda0 > 0) {
-            IERC20(asset0).approve(address(vedaTeller), toVeda0);
-            vedaTeller.deposit(asset0, toVeda0, 1);
+            // Track user "virtual" shares
+            userTokenShares[msg.sender][asset1] += params.amount1;
+            totalTokenShares[asset1] += params.amount1;
         }
-        if (toVeda1 > 0) {
-            IERC20(asset1).approve(address(vedaTeller), toVeda1);
-            vedaTeller.deposit(asset1, toVeda1, 1);
-        }
-
-        // Optional record-keeping of how many tokens user contributed.
-        userTokenShares[msg.sender][asset0] += params.amount0;
-        userTokenShares[msg.sender][asset1] += params.amount1;
-        totalTokenShares[asset0] += params.amount0;
-        totalTokenShares[asset1] += params.amount1;
     }
 
-    /**
-     * @notice Hook function called by the PoolManager before liquidity is added.
-     * @dev Ensures that liquidity is initialized properly.
-     */
+    // Called by PoolManager
     function beforeAddLiquidity(
         address sender,
         PoolKey calldata,
         IPoolManager.ModifyLiquidityParams calldata,
         bytes calldata
     ) external override onlyPoolManager returns (bytes4) {
+        console.log("Hook.beforeAddLiquidity() => sender:", sender);
         require(
             !liquidityInitialized || sender == address(this),
             "Add Liquidity through Hook"
@@ -203,10 +192,61 @@ contract Hook is BaseHook {
         return this.beforeAddLiquidity.selector;
     }
 
-    /**
-     * @notice Hook function called by the PoolManager before a swap occurs.
-     * @dev Withdraws from Aave and provides a short-range JIT liquidity position, if available.
-     */
+    // ------------------------------------------------------------
+    // (B) removeLiquidity => aggregatorVault
+    // Example only: you may want a more robust ratio-based approach
+    // ------------------------------------------------------------
+    function removeLiquidity(LiquidityParams calldata params) external {
+        console.log("Hook.removeLiquidity() => user:", msg.sender);
+
+        address asset0 = Currency.unwrap(params.currency0);
+        address asset1 = Currency.unwrap(params.currency1);
+
+        if (params.amount0 > 0) {
+            console.log(" removeLiquidity => token0 amount:", params.amount0);
+
+            uint256 userSh0 = userTokenShares[msg.sender][asset0];
+            require(userSh0 >= params.amount0, "not enough user token0 shares");
+
+            // Decrement user's "virtual" shares
+            userTokenShares[msg.sender][asset0] = userSh0 - params.amount0;
+            totalTokenShares[asset0] -= params.amount0;
+
+            // aggregatorVault withdraw from the Hook's shares
+            aggregatorVault.withdraw(
+                IERC20(asset0),
+                address(this),
+                params.amount0
+            );
+
+            // Now the Hook has these tokens => transfer them to user
+            IERC20(asset0).transfer(msg.sender, params.amount0);
+        }
+
+        if (params.amount1 > 0) {
+            console.log(" removeLiquidity => token1 amount:", params.amount1);
+
+            uint256 userSh1 = userTokenShares[msg.sender][asset1];
+            require(userSh1 >= params.amount1, "not enough user token1 shares");
+
+            // Decrement user's "virtual" shares
+            userTokenShares[msg.sender][asset1] = userSh1 - params.amount1;
+            totalTokenShares[asset1] -= params.amount1;
+
+            aggregatorVault.withdraw(
+                IERC20(asset1),
+                address(this),
+                params.amount1
+            );
+
+            // Now the Hook has these tokens => transfer them to user
+            IERC20(asset1).transfer(msg.sender, params.amount1);
+        }
+    }
+
+    // ------------------------------------------------------------
+    // (C) BEFORE SWAP => aggregator withdraw for JIT
+    // ------------------------------------------------------------
     function beforeSwap(
         address sender,
         PoolKey calldata key,
@@ -218,13 +258,32 @@ contract Hook is BaseHook {
         onlyPoolManager
         returns (bytes4, BeforeSwapDelta, uint24)
     {
-        // Check if the pool is initialized
-        (uint160 sqrtPriceX96, int24 currentTick, , ) = poolManager.getSlot0(
-            key.toId()
+        console.log("Hook.beforeSwap() => caller:", sender);
+
+        // 1) confirm pool is init and set range
+        (uint160 sqrtPriceX96, int24 currentTick) = _confirmPoolAndSetRange(
+            key,
+            hookData
         );
+
+        // 2) withdraw from vault and add liquidity
+        _withdrawFromVaultAndAddLiquidity(key, sqrtPriceX96, hookData);
+
+        return (this.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
+    }
+
+    // Helper for confirming pool initialization and setting tick range
+    function _confirmPoolAndSetRange(
+        PoolKey calldata key,
+        bytes calldata hookData
+    ) internal returns (uint160 sqrtPriceX96, int24 currentTick) {
+        // Get pool info
+        (sqrtPriceX96, currentTick, , ) = poolManager.getSlot0(key.toId());
+        console.log("   sqrtPriceX96 =>", sqrtPriceX96);
+        console.log("   currentTick =>", currentTick);
         if (sqrtPriceX96 == 0) revert PoolNotInitialized();
 
-        // If the user provided custom ticks, decode them. Otherwise, set a narrow range around currentTick.
+        // Set ephemeral range
         if (hookData.length > 0) {
             (tickLower, tickUpper) = abi.decode(hookData, (int24, int24));
         } else {
@@ -233,63 +292,54 @@ contract Hook is BaseHook {
             tickLower = finalTickLower;
             tickUpper = finalTickUpper;
         }
+        console.log("   chosen tickLower =>", tickLower);
+        console.log("   chosen tickUpper =>", tickUpper);
 
-        // Attempt to withdraw aggregator's balance from Aave for both tokens.
+        return (sqrtPriceX96, currentTick);
+    }
+
+    // Helper for withdrawing from vault and adding liquidity
+    function _withdrawFromVaultAndAddLiquidity(
+        PoolKey calldata key,
+        uint160 sqrtPriceX96,
+        bytes calldata hookData
+    ) internal {
+        // Withdraw all from aggregatorVault
         address asset0 = Currency.unwrap(key.currency0);
         address asset1 = Currency.unwrap(key.currency1);
+        uint256 totalSh0 = aggregatorVault.totalShares(IERC20(asset0));
+        uint256 totalSh1 = aggregatorVault.totalShares(IERC20(asset1));
+        console.log("   aggregatorVault totalShares0 =>", totalSh0);
+        console.log("   aggregatorVault totalShares1 =>", totalSh1);
 
-        // Retrieve aggregator's Aave balances via staticcall
-        (bool success0, bytes memory data0) = address(lendingProtocol)
-            .staticcall(
-                abi.encodeWithSignature(
-                    "suppliedBalances(address,address)",
-                    asset0,
-                    address(this)
-                )
-            );
-        uint256 aaveBalance0 = 0;
-        if (success0 && data0.length >= 32) {
-            aaveBalance0 = abi.decode(data0, (uint256));
+        if (totalSh0 > 0) {
+            console.log(" aggregatorVault.withdraw() all token0 =>", totalSh0);
+            aggregatorVault.withdraw(IERC20(asset0), address(this), totalSh0);
+        }
+        if (totalSh1 > 0) {
+            console.log(" aggregatorVault.withdraw() all token1 =>", totalSh1);
+            aggregatorVault.withdraw(IERC20(asset1), address(this), totalSh1);
         }
 
-        (bool success1, bytes memory data1) = address(lendingProtocol)
-            .staticcall(
-                abi.encodeWithSignature(
-                    "suppliedBalances(address,address)",
-                    asset1,
-                    address(this)
-                )
-            );
-        uint256 aaveBalance1 = 0;
-        if (success1 && data1.length >= 32) {
-            aaveBalance1 = abi.decode(data1, (uint256));
-        }
+        // Add liquidity with tokens
+        _addLiquidityWithTokens(key, sqrtPriceX96, asset0, asset1, hookData);
+    }
 
-        // Perform actual withdraw calls from Aave, ignoring any failure
-        if (aaveBalance0 > 0) {
-            try
-                lendingProtocol.withdraw(asset0, aaveBalance0, address(this))
-            returns (uint256) {
-                // Withdraw succeeded
-            } catch {
-                // Silence errors in this mock scenario
-            }
-        }
-        if (aaveBalance1 > 0) {
-            try
-                lendingProtocol.withdraw(asset1, aaveBalance1, address(this))
-            returns (uint256) {
-                // Withdraw succeeded
-            } catch {
-                // Silence errors in this mock scenario
-            }
-        }
-
-        // Determine the current token balances after withdrawal
+    // Helper for adding liquidity with tokens
+    function _addLiquidityWithTokens(
+        PoolKey calldata key,
+        uint160 sqrtPriceX96,
+        address asset0,
+        address asset1,
+        bytes calldata hookData
+    ) internal {
+        // Get balances
         uint256 bal0 = IERC20(asset0).balanceOf(address(this));
         uint256 bal1 = IERC20(asset1).balanceOf(address(this));
+        console.log("   final Hook contract bal0 =>", bal0);
+        console.log("   final Hook contract bal1 =>", bal1);
 
-        // Calculate how much liquidity can be formed with these balances and the desired tick range
+        // Calculate liquidity
         liquidityAdded = LiquidityAmounts.getLiquidityForAmounts(
             sqrtPriceX96,
             TickMath.getSqrtPriceAtTick(tickLower),
@@ -297,54 +347,78 @@ contract Hook is BaseHook {
             bal0,
             bal1
         );
+        console.log("   liquidityAdded =>", liquidityAdded);
 
-        // If we can add liquidity, proceed with modifyLiquidity
         if (liquidityAdded > 0) {
-            (BalanceDelta delta, ) = poolManager.modifyLiquidity(
-                key,
-                IPoolManager.ModifyLiquidityParams({
-                    tickLower: tickLower,
-                    tickUpper: tickUpper,
-                    liquidityDelta: int128(liquidityAdded),
-                    salt: bytes32(0)
-                }),
-                hookData
-            );
-
-            // If negative delta => aggregator owes tokens to the pool
-            int256 amt0 = delta.amount0();
-            if (amt0 < 0) {
-                uint256 owed0 = uint256(-amt0);
-                key.currency0.settle(poolManager, address(this), owed0, false);
-            }
-
-            int256 amt1 = delta.amount1();
-            if (amt1 < 0) {
-                uint256 owed1 = uint256(-amt1);
-                key.currency1.settle(poolManager, address(this), owed1, false);
-            }
+            _modifyLiquidityAndSettle(key, hookData);
+        } else {
+            console.log("   0 liquidity => skipping modifyLiquidity call.");
         }
-
-        return (this.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
     }
 
-    /**
-     * @notice Hook function called by the PoolManager after a swap has completed.
-     * @dev Removes any ephemeral JIT liquidity and re-supplies the aggregator's final balances to Aave.
-     */
+    // Helper for modifying liquidity and settling
+    function _modifyLiquidityAndSettle(
+        PoolKey calldata key,
+        bytes calldata hookData
+    ) internal {
+        (BalanceDelta delta, ) = poolManager.modifyLiquidity(
+            key,
+            IPoolManager.ModifyLiquidityParams({
+                tickLower: tickLower,
+                tickUpper: tickUpper,
+                liquidityDelta: int128(liquidityAdded),
+                salt: bytes32(0)
+            }),
+            hookData
+        );
+
+        if (delta.amount0() < 0) {
+            uint256 owed0 = uint256(int256(-delta.amount0()));
+            console.log(" aggregator owes token0 =>", owed0);
+            key.currency0.settle(poolManager, address(this), owed0, false);
+        }
+        if (delta.amount1() < 0) {
+            uint256 owed1 = uint256(int256(-delta.amount1()));
+            console.log(" aggregator owes token1 =>", owed1);
+            key.currency1.settle(poolManager, address(this), owed1, false);
+        }
+    }
+
+    // ------------------------------------------------------------
+    // (D) AFTER SWAP => remove ephemeral JIT range
+    // ------------------------------------------------------------
     function afterSwap(
         address /*sender*/,
         PoolKey calldata key,
         IPoolManager.SwapParams calldata,
-        BalanceDelta deltaIn,
+        BalanceDelta /*deltaIn*/,
         bytes calldata hookData
     ) external override onlyPoolManager returns (bytes4, int128) {
+        console.log("Hook.afterSwap() => removing JIT liquidity if any");
+
         if (liquidityAdded == 0) {
-            // If no JIT liquidity was added, there's nothing to do
+            console.log("   No JIT liquidity => skipping");
             return (this.afterSwap.selector, 0);
         }
 
-        // Remove the JIT liquidity
+        console.log("   Removing JIT liquidity =>", liquidityAdded);
+
+        // Remove liquidity
+        _removeLiquidityAndTakeTokens(key, hookData);
+
+        // Re-deposit leftover tokens
+        _reDepositLeftoverTokens(key);
+
+        // reset
+        liquidityAdded = 0;
+        return (this.afterSwap.selector, 0);
+    }
+
+    // Helper to remove liquidity and take tokens
+    function _removeLiquidityAndTakeTokens(
+        PoolKey calldata key,
+        bytes calldata hookData
+    ) internal {
         (BalanceDelta delta, ) = poolManager.modifyLiquidity(
             key,
             IPoolManager.ModifyLiquidityParams({
@@ -356,58 +430,42 @@ contract Hook is BaseHook {
             hookData
         );
 
-        // Take any owed tokens back to this contract
         if (delta.amount0() > 0) {
             uint256 amt0 = uint256(int256(delta.amount0()));
+            console.log(" aggregator Taking token0 =>", amt0);
             key.currency0.take(poolManager, address(this), amt0, false);
         }
         if (delta.amount1() > 0) {
             uint256 amt1 = uint256(int256(delta.amount1()));
+            console.log(" aggregator Taking token1 =>", amt1);
             key.currency1.take(poolManager, address(this), amt1, false);
         }
-
-        // Re-supply leftover tokens to Aave
-        address asset0 = Currency.unwrap(key.currency0);
-        address asset1 = Currency.unwrap(key.currency1);
-
-        uint256 finalBal0 = IERC20(asset0).balanceOf(address(this));
-        uint256 finalBal1 = IERC20(asset1).balanceOf(address(this));
-
-        if (finalBal0 > 0) {
-            IERC20(asset0).approve(address(lendingProtocol), finalBal0);
-            try lendingProtocol.supply(asset0, finalBal0, address(this), 0) {
-                // No additional action on success
-            } catch {
-                // Silence errors in this mock scenario
-            }
-        }
-        if (finalBal1 > 0) {
-            IERC20(asset1).approve(address(lendingProtocol), finalBal1);
-            try lendingProtocol.supply(asset1, finalBal1, address(this), 0) {
-                // No additional action on success
-            } catch {
-                // Silence errors in this mock scenario
-            }
-        }
-
-        // Reset the local tracking
-        liquidityAdded = 0;
-
-        return (this.afterSwap.selector, 0);
     }
 
-    /**
-     * @notice Returns the lower tick used in the ephemeral JIT range.
-     * @return The current stored tickLower value.
-     */
+    // Helper to re-deposit leftover tokens
+    function _reDepositLeftoverTokens(PoolKey calldata key) internal {
+        address asset0 = Currency.unwrap(key.currency0);
+        address asset1 = Currency.unwrap(key.currency1);
+        uint256 finalBal0 = IERC20(asset0).balanceOf(address(this));
+        uint256 finalBal1 = IERC20(asset1).balanceOf(address(this));
+        console.log("   finalBal0 =>", finalBal0);
+        console.log("   finalBal1 =>", finalBal1);
+
+        if (finalBal0 > 0) {
+            IERC20(asset0).approve(address(aggregatorVault), finalBal0);
+            aggregatorVault.deposit(IERC20(asset0), address(this), finalBal0);
+        }
+        if (finalBal1 > 0) {
+            IERC20(asset1).approve(address(aggregatorVault), finalBal1);
+            aggregatorVault.deposit(IERC20(asset1), address(this), finalBal1);
+        }
+    }
+
+    // helper views
     function getTickLower() external view returns (int24) {
         return tickLower;
     }
 
-    /**
-     * @notice Returns the upper tick used in the ephemeral JIT range.
-     * @return The current stored tickUpper value.
-     */
     function getTickUpper() external view returns (int24) {
         return tickUpper;
     }
