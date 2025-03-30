@@ -1,25 +1,29 @@
-
-# AlphaEngine
+# AlphaEngine - Uniswap V4 Hookathon Submission
 
 **AlphaEngine** is a Uniswap V4 Hook prototype that unlocks idle liquidity from stablecoin pools, directing it into a permissionless marketplace of profitable trading strategies. By dynamically allocating otherwise unused liquidity to vetted strategies, AlphaEngine aims to maximize returns for liquidity providers while creating a transparent platform for developers and quants to monetize their trading expertise.
+
+## Links to Presentation & Demo
+- **PPT Slides**: [Hackathon Project PPT](https://docs.google.com/presentation/d/15ofBnfH0QZpYLkQE4UzJkiTBWHggO9OJSDvJL9plVO8/edit?usp=drive_link)  
+- **Demo Video**: [Demo Recording](https://drive.google.com/file/d/1Xt8qiuEl0TIBrrGDjVNKZBG2RGpkr9hk/view?usp=drive_link)
 
 ---
 
 ## Table of Contents
 1. [Overview](#overview)
 2. [Key Features](#key-features)
-3. [Architecture](#architecture)
-4. [How It Works](#how-it-works)
-5. [Project Structure](#project-structure)
-6. [Tests & Coverage](#tests--coverage)
-7. [Future Extensions](#future-extensions)
-8. [Contact & Contribution](#contact--contribution)
-9. [Acknowledgments](#acknowledgments)
+3. [Getting Started](#getting-started)
+4. [Tests & Coverage](#tests--coverage)
+5. [Architecture](#architecture)
+6. [How It Works](#how-it-works)
+7. [Project Structure](#project-structure)
+8. [Future Extensions](#future-extensions)
+9. [Contact & Contribution](#contact--contribution)
+10. [Acknowledgments](#acknowledgments)
 
 ---
 
 ## Overview
-Uniswap’s stablecoin pools often see **up to 90%** of liquidity remaining idle. **AlphaEngine** bridges this gap by:
+Uniswap's stablecoin pools often see **up to 90%** of liquidity remaining idle. **AlphaEngine** bridges this gap by:
 - Allowing DeFi strategists to propose and run verified strategies using that otherwise idle capital.
 - Dynamically pulling liquidity into these strategies via **Uniswap V4 Hooks**—only when beneficial—while preserving minimal impact on normal trading.
 - **Automatically** depositing unused liquidity into aggregator vaults (e.g., `HookVault`) that invest in multiple trading strategies, generating additional yield.
@@ -31,8 +35,8 @@ Uniswap’s stablecoin pools often see **up to 90%** of liquidity remaining idle
 ## Key Features
 
 1. **Uniswap V4 Hook Integration**  
-   - **Before/After Swap Logic**: Temporarily provides ephemeral “just-in-time” liquidity for specific swaps.  
-   - **Deposits & Withdrawals**: If liquidity isn’t actively used, it remains in `HookVault` generating additional returns.
+   - **Before/After Swap Logic**: Temporarily provides ephemeral "just-in-time" liquidity for specific swaps.  
+   - **Deposits & Withdrawals**: If liquidity isn't actively used, it remains in `HookVault` generating additional returns.
 
 2. **Idle Liquidity Optimization**  
    Harness inactive Uniswap liquidity to generate yield through multiple trading strategies, governed by a flexible aggregator vault (`HookVault`).
@@ -48,56 +52,25 @@ Uniswap’s stablecoin pools often see **up to 90%** of liquidity remaining idle
 
 ---
 
-## Architecture
-```mermaid
-flowchart LR
-    A[Idle Uniswap Liquidity] --> B[AlphaEngine Hook]
-    B --> C(HookVault)
-    C -->|Invest| D[Various Trading Strategies]
-    B --> E[Uniswap V4 Swap Event]
-    E -->|Provide JIT Liquidity| B
+## Getting Started
+
+### 1. Clone this repo:
+```bash
+git clone <your-fork-or-origin>
 ```
-1. **Idle Liquidity**: Initially sitting in stablecoin pools.  
-2. **AlphaEngine Hook**: Intercepts swaps and add/remove liquidity on-the-fly.  
-3. **HookVault**: Aggregates assets, invests in multiple strategies, or holds them until a JIT swap event triggers a withdrawal.
 
----
-
-## How It Works
-1. **User Deposits**  
-   - LPs deposit tokens into our Hook (via `addLiquidity`), which in turn calls `HookVault.deposit(...)`.  
-   - The vault invests these tokens across multiple whitelisted strategies.
-
-2. **JIT Swap**  
-   - During a Uniswap swap, the Hook withdraws from the vault only if extra liquidity can enhance returns or lower slippage.  
-   - After the swap completes, leftover tokens are re-deposited automatically to keep earning yield.
-
-3. **Strategy Proposals**  
-   - Strategy creators propose a new alpha approach, passing risk checks (backtesting, potential ZK proofs, etc.).  
-   - If approved, it gains access to a portion of the aggregator vault’s liquidity for real-time usage.
-
-4. **Returns & Transparency**  
-   - Strategies share a portion of profits with LPs.  
-   - Full logs and (optional) zero-knowledge attestations ensure that only safe or “vetted” strategies can handle user funds.
-
----
-
-## Project Structure
+### 2. Install Dependencies (via Foundry or Yarn + Foundry):
+```bash
+forge install
 ```
-.
-├── src
-│   └── Hook.sol                # Primary Hook logic for JIT liquidity & aggregatorVault integration
-│   └── HookVault.sol           # Vault which locks the user's funds and source of liquidity for various trading strategies
-├── test
-│   └── HookIntegration.t.sol   # Integration tests verifying deposit, JIT swaps, etc.
-├── foundry.toml                # Foundry configuration
-├── remappings.txt              # Remappings for imports
-├── package.json                # Basic project metadata
-├── .solhint.json               # Solhint config
-├── .prettierrc                 # Prettier config for Solidity
-└── README.md                   # This file
+
+### 3. Configure your environment if needed (e.g., .env for test or mainnet fork).
+
+### 4. Compile and Test:
+```bash
+forge build
+forge test
 ```
-*We have removed older mock or ancillary files (like `MockAavePool`, `MockTeller.sol`, etc.) to focus on the aggregator vault approach.*
 
 ---
 
@@ -143,13 +116,6 @@ forge test -vvvv
 **7. `test_BasicSwap_With_JIT()`**  
    - Validates the ephemeral JIT (just-in-time) liquidity cycle, withdrawing from `HookVault` and then returning leftover tokens.
 
-**Additional Corner Cases**  
-- *Dust Swap*  
-- *Large Overflow Swap*  
-- *Exceeding aggregatorVault liquidity*  
-- *Partial usage across multiple swaps*  
-- *No aggregatorVault shares => normal swap*
-
 ### Coverage Report
 
 ```
@@ -185,6 +151,58 @@ Ran 1 test suite in 352.23ms (51.41ms CPU time): 13 tests passed, 0 failed, 0 sk
 ╰-------------------+------------------+------------------+----------------+----------------╯
 ```
 
+---
+
+## Architecture
+```mermaid
+flowchart LR
+    A[Idle Uniswap Liquidity] --> B[AlphaEngine Hook]
+    B --> C(HookVault)
+    C -->|Invest| D[Various Trading Strategies]
+    B --> E[Uniswap V4 Swap Event]
+    E -->|Provide JIT Liquidity| B
+```
+1. **Idle Liquidity**: Initially sitting in stablecoin pools.  
+2. **AlphaEngine Hook**: Intercepts swaps and add/remove liquidity on-the-fly.  
+3. **HookVault**: Aggregates assets, invests in multiple strategies, or holds them until a JIT swap event triggers a withdrawal.
+
+---
+
+## How It Works
+1. **User Deposits**  
+   - LPs deposit tokens into our Hook (via `addLiquidity`), which in turn calls `HookVault.deposit(...)`.  
+   - The vault invests these tokens across multiple whitelisted strategies.
+
+2. **JIT Swap**  
+   - During a Uniswap swap, the Hook withdraws from the vault only if extra liquidity can enhance returns or lower slippage.  
+   - After the swap completes, leftover tokens are re-deposited automatically to keep earning yield.
+
+3. **Strategy Proposals**  
+   - Strategy creators propose a new alpha approach, passing risk checks (backtesting, potential ZK proofs, etc.).  
+   - If approved, it gains access to a portion of the aggregator vault's liquidity for real-time usage.
+
+4. **Returns & Transparency**  
+   - Strategies share a portion of profits with LPs.  
+   - Full logs and (optional) zero-knowledge attestations ensure that only safe or "vetted" strategies can handle user funds.
+
+---
+
+## Project Structure
+```
+.
+├── src
+│   └── Hook.sol                # Primary Hook logic for JIT liquidity & aggregatorVault integration
+│   └── HookVault.sol           # Vault which locks the user's funds and source of liquidity for various trading strategies
+├── test
+│   └── HookIntegration.t.sol   # Integration tests verifying deposit, JIT swaps, etc.
+├── foundry.toml                # Foundry configuration
+├── remappings.txt              # Remappings for imports
+├── package.json                # Basic project metadata
+├── .solhint.json               # Solhint config
+├── .prettierrc                 # Prettier config for Solidity
+└── README.md                   # This file
+```
+*We have removed older mock or ancillary files (like `MockAavePool`, `MockTeller.sol`, etc.) to focus on the aggregator vault approach.*
 
 ---
 
