@@ -592,4 +592,341 @@ contract HookIntegrationTest is Test, Deployers {
         );
         return user;
     }
+    // ============================================================
+    //        (1) Swap with Very Small Amount (Dust Swap)
+    // ============================================================
+    // CODE_UPDATED_HERE: New test for dust-level swaps
+    function test_Swap_VerySmallDust() public {
+        console.log("=== test_Swap_VerySmallDust begin ===");
+
+        // 1) aggregator deposits some moderate amounts
+        address depositor = makeNewUserWithTokens(5_000 ether, 5_000 ether);
+        console.log("   aggregator depositor =>", depositor);
+
+        vm.startPrank(depositor);
+        // Approve
+        MockERC20(address(uint160(Currency.unwrap(tokenA)))).approve(
+            address(testHook),
+            type(uint256).max
+        );
+        MockERC20(address(uint160(Currency.unwrap(tokenB)))).approve(
+            address(testHook),
+            type(uint256).max
+        );
+
+        // deposit ~500 each
+        testHook.addLiquidity(
+            Hook.LiquidityParams({
+                fee: poolKey.fee,
+                currency0: tokenA,
+                currency1: tokenB,
+                amount0: 500 ether,
+                amount1: 500 ether,
+                key: poolKey
+            })
+        );
+        vm.stopPrank();
+
+        // 2) create swapper with dust-level tokenA
+        address swapper = makeNewUserWithTokens(0.000001 ether, 0 ether);
+        // ^ "dust" might be 1 wei or 0.000001, adapt as needed
+
+        vm.startPrank(swapper);
+        // Approve to the swapRouter
+        MockERC20(address(uint160(Currency.unwrap(tokenA)))).approve(
+            address(swapRouter),
+            type(uint256).max
+        );
+
+        // 3) do a small A => B swap
+        bool zeroForOne = true; // A => B
+        int256 amountSpecified = 0.000001 ether; // dust
+        uint160 priceLimit = zeroForOne
+            ? TickMath.MIN_SQRT_PRICE + 1
+            : TickMath.MAX_SQRT_PRICE - 1;
+
+        IPoolManager.SwapParams memory swapParams = IPoolManager.SwapParams({
+            zeroForOne: zeroForOne,
+            amountSpecified: amountSpecified,
+            sqrtPriceLimitX96: priceLimit
+        });
+
+        PoolSwapTest.TestSettings memory testSettings = PoolSwapTest
+            .TestSettings({takeClaims: false, settleUsingBurn: false});
+
+        console.log("   test_Swap_VerySmallDust => swapping dust tokenA => B");
+        swapRouter.swap(poolKey, swapParams, testSettings, bytes(""));
+        vm.stopPrank();
+
+        // 4) The aggregatorVault & Hook will handle JIT deposit/withdraw with a tiny liquidity range
+        console.log("=== test_Swap_VerySmallDust done ===");
+    }
+
+    // ============================================================
+    //     (2) Swap with a Large Amount (Potential Overflow)
+    // ============================================================
+    // CODE_UPDATED_HERE: New test for extremely large swap scenario
+    function test_Swap_Huge_AmountPotentialOverflow() public {
+        console.log("=== test_Swap_Huge_AmountPotentialOverflow begin ===");
+
+        // 1) aggregator invests extremely large amounts
+        address depositor = makeNewUserWithTokens(1e24, 1e24); // for example
+        console.log("   aggregator depositor =>", depositor);
+
+        vm.startPrank(depositor);
+        MockERC20(address(uint160(Currency.unwrap(tokenA)))).approve(
+            address(testHook),
+            type(uint256).max
+        );
+        MockERC20(address(uint160(Currency.unwrap(tokenB)))).approve(
+            address(testHook),
+            type(uint256).max
+        );
+
+        testHook.addLiquidity(
+            Hook.LiquidityParams({
+                fee: poolKey.fee,
+                currency0: tokenA,
+                currency1: tokenB,
+                amount0: 1e23, // deposit a big chunk
+                amount1: 1e23,
+                key: poolKey
+            })
+        );
+        vm.stopPrank();
+
+        // 2) swapper tries a huge swap that might push the aggregator's math to the limit
+        address swapper = makeNewUserWithTokens(1e22, 0); // large A
+        console.log("   test_Swap_Huge => swapper =>", swapper);
+
+        vm.startPrank(swapper);
+        // Approve big
+        MockERC20(address(uint160(Currency.unwrap(tokenA)))).approve(
+            address(swapRouter),
+            type(uint256).max
+        );
+
+        // 3) do a large A => B swap
+        bool zeroForOne = true;
+        int256 amountSpecified = 5e21; // e.g. 5 * 10^21
+        // limit is basically wide open
+        uint160 priceLimit = zeroForOne
+            ? TickMath.MIN_SQRT_PRICE + 10
+            : TickMath.MAX_SQRT_PRICE - 10;
+
+        IPoolManager.SwapParams memory swapParams = IPoolManager.SwapParams({
+            zeroForOne: zeroForOne,
+            amountSpecified: amountSpecified,
+            sqrtPriceLimitX96: priceLimit
+        });
+
+        PoolSwapTest.TestSettings memory testSettings = PoolSwapTest
+            .TestSettings({takeClaims: false, settleUsingBurn: false});
+
+        console.log(
+            "   test_Swap_Huge_AmountPotentialOverflow => performing large swap now"
+        );
+        swapRouter.swap(poolKey, swapParams, testSettings, bytes(""));
+        vm.stopPrank();
+
+        console.log("=== test_Swap_Huge_AmountPotentialOverflow done ===");
+    }
+
+    // ============================================================
+    //  (3) Swap that Exceeds Available Liquidity in aggregatorVault
+    // ============================================================
+    // CODE_UPDATED_HERE: user tries to swap far more than aggregatorVault can meaningfully cover
+    function test_Swap_ExceedsAvailableLiquidity() public {
+        console.log("=== test_Swap_ExceedsAvailableLiquidity begin ===");
+
+        // 1) aggregator deposits modest amounts
+        address depositor = makeNewUserWithTokens(1000 ether, 1000 ether);
+        vm.startPrank(depositor);
+        MockERC20(address(uint160(Currency.unwrap(tokenA)))).approve(
+            address(testHook),
+            type(uint256).max
+        );
+        MockERC20(address(uint160(Currency.unwrap(tokenB)))).approve(
+            address(testHook),
+            type(uint256).max
+        );
+        testHook.addLiquidity(
+            Hook.LiquidityParams({
+                fee: poolKey.fee,
+                currency0: tokenA,
+                currency1: tokenB,
+                amount0: 500 ether,
+                amount1: 500 ether,
+                key: poolKey
+            })
+        );
+        vm.stopPrank();
+
+        // aggregatorVault now has 500 A, 500 B in total.
+
+        // 2) swapper tries an enormous A => B swap (like 50,000)
+        address swapper = makeNewUserWithTokens(50_000 ether, 0);
+        vm.startPrank(swapper);
+        MockERC20(address(uint160(Currency.unwrap(tokenA)))).approve(
+            address(swapRouter),
+            type(uint256).max
+        );
+
+        bool zeroForOne = true; // A => B
+        int256 amountSpecified = 50_000 ether;
+        uint160 priceLimit = zeroForOne
+            ? TickMath.MIN_SQRT_PRICE + 1
+            : TickMath.MAX_SQRT_PRICE - 1;
+
+        console.log(
+            "   aggregatorVault has only 500 A... user tries swap of 50,000 A => B"
+        );
+        IPoolManager.SwapParams memory swapParams = IPoolManager.SwapParams({
+            zeroForOne: zeroForOne,
+            amountSpecified: amountSpecified,
+            sqrtPriceLimitX96: priceLimit
+        });
+
+        swapRouter.swap(
+            poolKey,
+            swapParams,
+            PoolSwapTest.TestSettings({
+                takeClaims: false,
+                settleUsingBurn: false
+            }),
+            bytes("")
+        );
+        vm.stopPrank();
+
+        // aggregator can partially cover or the pool adjusts the price. Should not revert.
+        console.log("=== test_Swap_ExceedsAvailableLiquidity done ===");
+    }
+
+    // ============================================================
+    // (4) Partial aggregatorVault usage for Swap, then Additional
+    // ============================================================
+    // CODE_UPDATED_HERE: aggregator invests partial amount if the swap is small, then do a second swap.
+    function test_Swap_PartialUsage_ThenMoreSwaps() public {
+        console.log("=== test_Swap_PartialUsage_ThenMoreSwaps begin ===");
+
+        // 1) aggregator deposits 1000 A, 1000 B
+        address depositor = makeNewUserWithTokens(2_000 ether, 2_000 ether);
+        vm.startPrank(depositor);
+        MockERC20(address(uint160(Currency.unwrap(tokenA)))).approve(
+            address(testHook),
+            type(uint256).max
+        );
+        MockERC20(address(uint160(Currency.unwrap(tokenB)))).approve(
+            address(testHook),
+            type(uint256).max
+        );
+        testHook.addLiquidity(
+            Hook.LiquidityParams({
+                fee: poolKey.fee,
+                currency0: tokenA,
+                currency1: tokenB,
+                amount0: 1000 ether,
+                amount1: 1000 ether,
+                key: poolKey
+            })
+        );
+        vm.stopPrank();
+
+        // aggregatorVault => 1000 A, 1000 B
+
+        // 2) user #1 does a small swap => aggregator invests partial
+        address swapper1 = makeNewUserWithTokens(10 ether, 0);
+        vm.startPrank(swapper1);
+        MockERC20(address(uint160(Currency.unwrap(tokenA)))).approve(
+            address(swapRouter),
+            10 ether
+        );
+
+        console.log("   user #1 => small swap A => B of 10 tokens");
+        IPoolManager.SwapParams memory swap1 = IPoolManager.SwapParams({
+            zeroForOne: true,
+            amountSpecified: 10 ether,
+            sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 100
+        });
+        swapRouter.swap(
+            poolKey,
+            swap1,
+            PoolSwapTest.TestSettings(false, false),
+            bytes("")
+        );
+        vm.stopPrank();
+
+        // aggregator uses partial of the 1000 A
+
+        // 3) user #2 does a bigger swap => aggregator invests more
+        address swapper2 = makeNewUserWithTokens(0, 500 ether);
+        vm.startPrank(swapper2);
+        MockERC20(address(uint160(Currency.unwrap(tokenB)))).approve(
+            address(swapRouter),
+            type(uint256).max
+        );
+
+        console.log("   user #2 => bigger swap B => A of 200 tokens");
+        IPoolManager.SwapParams memory swap2 = IPoolManager.SwapParams({
+            zeroForOne: false,
+            amountSpecified: 200 ether,
+            sqrtPriceLimitX96: TickMath.MAX_SQRT_PRICE - 100
+        });
+        swapRouter.swap(
+            poolKey,
+            swap2,
+            PoolSwapTest.TestSettings(false, false),
+            bytes("")
+        );
+        vm.stopPrank();
+
+        console.log("=== test_Swap_PartialUsage_ThenMoreSwaps done ===");
+    }
+
+    // ============================================================
+    //        (5) No aggregatorVault Shares => Swap Attempt
+    // ============================================================
+    // CODE_UPDATED_HERE: aggregator does not deposit at all => user tries a swap
+    function test_Swap_NoVaultShares() public {
+        console.log("=== test_Swap_NoVaultShares begin ===");
+
+        // aggregatorVault has 0 shares for both tokens
+        console.log(
+            " aggregatorVault is empty => totalShares tokenA:",
+            aggregatorVault.totalShares(IERC20(Currency.unwrap(tokenA)))
+        );
+        console.log(
+            " aggregatorVault is empty => totalShares tokenB:",
+            aggregatorVault.totalShares(IERC20(Currency.unwrap(tokenB)))
+        );
+
+        // user tries a normal swap A => B
+        address swapper = makeNewUserWithTokens(100 ether, 0);
+
+        vm.startPrank(swapper);
+        MockERC20(address(uint160(Currency.unwrap(tokenA)))).approve(
+            address(swapRouter),
+            type(uint256).max
+        );
+
+        IPoolManager.SwapParams memory swapParams = IPoolManager.SwapParams({
+            zeroForOne: true,
+            amountSpecified: 20 ether,
+            sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
+        });
+        console.log(
+            "   aggregatorVault has 0 shares, user tries a 20 A => B swap"
+        );
+
+        swapRouter.swap(
+            poolKey,
+            swapParams,
+            PoolSwapTest.TestSettings(false, false),
+            bytes("")
+        );
+        vm.stopPrank();
+
+        // aggregator's JIT logic won't deposit anything => no revert
+        console.log("=== test_Swap_NoVaultShares done ===");
+    }
 }
